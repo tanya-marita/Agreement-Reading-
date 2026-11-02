@@ -42,12 +42,24 @@ class LLMResult:
     output_tokens: int
 
 
+def is_missing_or_placeholder_api_key(api_key: str | None) -> bool:
+    key = (api_key or "").strip().lower()
+    return (
+        not key
+        or "..." in key
+        or key.startswith("<")
+        or key in {"your_api_key_here", "your-anthropic-api-key", "changeme"}
+    )
+
+
 def get_client(api_key: str | None = None):
     import anthropic
 
-    key = api_key or os.getenv("ANTHROPIC_API_KEY")
-    if not key:
-        raise ExtractionError("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+    key = api_key if api_key is not None else os.getenv("ANTHROPIC_API_KEY")
+    if is_missing_or_placeholder_api_key(key):
+        raise ExtractionError(
+            "Set a real ANTHROPIC_API_KEY in your .env file; replace the example placeholder."
+        )
     return anthropic.Anthropic(api_key=key, max_retries=3, timeout=180)
 
 

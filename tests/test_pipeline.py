@@ -12,7 +12,15 @@ sys.path.insert(0, ROOT)
 SAMPLES = os.path.join(ROOT, "samples")
 
 from extractor.loaders import UnsupportedFileError, load_file  # noqa: E402
+from extractor.llm import ExtractionError, get_client  # noqa: E402
 from extractor.postprocess import postprocess  # noqa: E402
+
+
+@pytest.mark.parametrize("api_key", ["", "sk-ant-...", "your_api_key_here", "<your-api-key>"])
+def test_get_client_rejects_missing_or_placeholder_api_keys(api_key, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", api_key)
+    with pytest.raises(ExtractionError, match="Set a real ANTHROPIC_API_KEY"):
+        get_client()
 
 
 def read(name):

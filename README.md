@@ -41,6 +41,7 @@ Copy-Item .env.example .env
 Run these commands from the project directory (the directory containing `requirements.txt`). If PowerShell blocks the activation script, allow locally created scripts for your user with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 Get an API key at https://console.anthropic.com. Check https://docs.claude.com for current model names and set `CLAUDE_MODEL` in `.env` if needed.
+Replace the example `ANTHROPIC_API_KEY` value in `.env` with your real key before uploading documents.
 
 ## Run
 

@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from extractor import ExtractionError, UnsupportedFileError, process_file, storage  # noqa: E402
+from extractor.llm import is_missing_or_placeholder_api_key  # noqa: E402
 from extractor.postprocess import postprocess  # noqa: E402
 from extractor.schema import AGREEMENT_SCHEMA  # noqa: E402
 
@@ -155,8 +156,8 @@ def review_form(row: dict):
 st.sidebar.title("📄 Agreement Extractor")
 page = st.sidebar.radio("Go to", ["Upload", "All agreements", "Review"])
 user = st.sidebar.text_input("Your name (for the record)", key="user")
-if not os.getenv("ANTHROPIC_API_KEY"):
-    st.sidebar.error("ANTHROPIC_API_KEY is not set in .env")
+if is_missing_or_placeholder_api_key(os.getenv("ANTHROPIC_API_KEY")):
+    st.sidebar.error("Replace the ANTHROPIC_API_KEY placeholder in .env with your real Anthropic API key.")
 
 if page == "Upload":
     st.header("Upload agreements")
