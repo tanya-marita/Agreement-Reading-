@@ -66,6 +66,12 @@ def test_google_auth_error_has_provider_specific_guidance():
     assert "AI Studio" in message
 
 
+def test_google_overload_error_explains_retry_and_fallback():
+    message = _google_api_error_message(503, "high demand")
+    assert "automatic retries and the fallback model were unsuccessful" in message
+    assert "retry" in message
+
+
 def test_google_extraction_uses_structured_output():
     class FakeGoogleClient:
         def __init__(self):
@@ -121,6 +127,38 @@ def test_google_image_is_sent_as_image_part():
     assert len(parts) == 1
     assert isinstance(parts[0], types.Part)
     assert parts[0].inline_data.mime_type == "image/jpeg"
+
+
+def test_google_extraction_uses_fallback_model_after_overload(monkeypatch):
+    from google.genai import errors
+    import extractor.llm as llm
+
+    class FakeGoogleClient:
+        def __init__(self):
+            self.models = self
+            self.requested_models = []
+
+        def generate_content(self, *, model, **kwargs):
+            self.requested_models.append(model)
+            if model == "primary-model":
+                raise errors.APIError(
+                    503,
+                    {"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}},
+                )
+            return SimpleNamespace(
+                text=json.dumps(SAMPLE_OUTPUT),
+                usage_metadata=SimpleNamespace(prompt_token_count=100, candidates_token_count=50),
+            )
+
+    monkeypatch.setattr(llm, "DEFAULT_GOOGLE_FALLBACK_MODEL", "fallback-model")
+    client = FakeGoogleClient()
+    doc = load_file(read("service_agreement_text.pdf"), "agreement.pdf")
+
+    result = extract_with_google(doc, client=client, model="primary-model")
+
+    assert client.requested_models == ["primary-model", "fallback-model"]
+    assert result.model == "fallback-model"
+    assert any("processed with fallback-model" in warning for warning in result.data["warnings"])
 
 
 def test_unknown_provider_is_rejected():

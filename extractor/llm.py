@@ -11,6 +11,7 @@ from .schema import AGREEMENT_SCHEMA
 DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").strip().lower()
 DEFAULT_ANTHROPIC_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
 DEFAULT_GOOGLE_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+DEFAULT_GOOGLE_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
 TOOL_NAME = "record_agreement_details"
 
 SYSTEM_PROMPT = """You extract structured data from business agreements and contracts for a company's records system.
@@ -79,8 +80,19 @@ def get_client(provider: str | None = None, api_key: str | None = None):
         raise ExtractionError(configuration_error)
     if provider == "google":
         from google import genai
+        from google.genai import types
 
-        return genai.Client(api_key=key)
+        return genai.Client(
+            api_key=key,
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(
+                    attempts=2,
+                    initial_delay=1.0,
+                    max_delay=4.0,
+                    http_status_codes=[500, 502, 503, 504],
+                )
+            ),
+        )
 
     import anthropic
 
@@ -114,6 +126,11 @@ def _google_api_error_message(status_code: int, message: str) -> str:
         return (
             "Google Gemini rate or quota limit was reached (429). Check the API quota and billing "
             "for the Google project, then retry later."
+        )
+    if status_code >= 500:
+        return (
+            f"Google Gemini is temporarily unavailable ({status_code}); automatic retries and the "
+            f"fallback model were unsuccessful. Please wait a few minutes and retry. Details: {message}"
         )
     return f"Google Gemini API error {status_code}: {message}"
 
@@ -213,18 +230,32 @@ def extract_with_google(doc: LoadedDocument, client=None, model: str | None = No
     contents = _google_document_parts(doc)
     contents.append(SYSTEM_PROMPT + "\n\n" + USER_INSTRUCTION)
 
+    config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=_google_compatible_schema(AGREEMENT_SCHEMA),
+        max_output_tokens=4096,
+    )
+    response_model = model
+    fallback_model = DEFAULT_GOOGLE_FALLBACK_MODEL
+
     try:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_google_compatible_schema(AGREEMENT_SCHEMA),
-                max_output_tokens=4096,
-            ),
-        )
+        response = client.models.generate_content(model=model, contents=contents, config=config)
     except genai.errors.APIError as e:
-        raise ExtractionError(_google_api_error_message(e.code or 0, e.message or "")) from e
+        if (e.code or 0) < 500 or not fallback_model or fallback_model == model:
+            raise ExtractionError(
+                _google_api_error_message(e.code or 0, e.message or "")
+            ) from e
+        try:
+            response = client.models.generate_content(
+                model=fallback_model,
+                contents=contents,
+                config=config,
+            )
+            response_model = fallback_model
+        except genai.errors.APIError as fallback_error:
+            raise ExtractionError(
+                _google_api_error_message(fallback_error.code or 0, fallback_error.message or "")
+            ) from fallback_error
 
     if not response.text:
         raise ExtractionError("Google Gemini returned an empty response; retry or check the model/API settings.")
@@ -234,11 +265,15 @@ def extract_with_google(doc: LoadedDocument, client=None, model: str | None = No
         raise ExtractionError("Google Gemini returned invalid JSON instead of agreement details.") from e
     if not isinstance(data, dict):
         raise ExtractionError("Google Gemini returned a JSON value that is not an agreement object.")
+    if response_model != model:
+        data.setdefault("warnings", []).append(
+            f"The primary Gemini model was unavailable; this document was processed with {response_model}."
+        )
 
     usage = response.usage_metadata
     return LLMResult(
         data=data,
-        model=model,
+        model=response_model,
         input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
         output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
     )

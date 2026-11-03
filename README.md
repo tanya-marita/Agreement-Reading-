@@ -40,7 +40,7 @@ Copy-Item .env.example .env
 
 Run these commands from the project directory (the directory containing `requirements.txt`). If PowerShell blocks the activation script, allow locally created scripts for your user with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
-Choose `LLM_PROVIDER=anthropic` and set `ANTHROPIC_API_KEY` from https://console.anthropic.com, or choose `LLM_PROVIDER=google` and set `GOOGLE_API_KEY` from https://aistudio.google.com/app/apikey. Do not put a Google key in `ANTHROPIC_API_KEY`. Set `CLAUDE_MODEL` or `GEMINI_MODEL` if you want to change the provider's default model. Restart Streamlit after editing `.env`.
+Choose `LLM_PROVIDER=anthropic` and set `ANTHROPIC_API_KEY` from https://console.anthropic.com, or choose `LLM_PROVIDER=google` and set `GOOGLE_API_KEY` from https://aistudio.google.com/app/apikey. Do not put a Google key in `ANTHROPIC_API_KEY`. Set `CLAUDE_MODEL`, `GEMINI_MODEL`, or `GEMINI_FALLBACK_MODEL` to change the default models. Google requests retry transient 5xx errors and then try the fallback model; restart Streamlit after editing `.env`.
 If an upload reports an authentication error, the selected provider rejected the configured key. A key merely being present in `.env` does not mean the provider accepts it. Revoke any key shared in screenshots or chats and create a replacement for the selected provider.
 
 ## Run
