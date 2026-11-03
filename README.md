@@ -40,8 +40,8 @@ Copy-Item .env.example .env
 
 Run these commands from the project directory (the directory containing `requirements.txt`). If PowerShell blocks the activation script, allow locally created scripts for your user with `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
-Get an API key at https://console.anthropic.com. Check https://docs.claude.com for current model names and set `CLAUDE_MODEL` in `.env` if needed.
-Replace the example `ANTHROPIC_API_KEY` value in `.env` with your real key before uploading documents.
+Choose `LLM_PROVIDER=anthropic` and set `ANTHROPIC_API_KEY` from https://console.anthropic.com, or choose `LLM_PROVIDER=google` and set `GOOGLE_API_KEY` from https://aistudio.google.com/app/apikey. Do not put a Google key in `ANTHROPIC_API_KEY`. Set `CLAUDE_MODEL` or `GEMINI_MODEL` if you want to change the provider's default model. Restart Streamlit after editing `.env`.
+If an upload reports an authentication error, the selected provider rejected the configured key. A key merely being present in `.env` does not mean the provider accepts it. Revoke any key shared in screenshots or chats and create a replacement for the selected provider.
 
 ## Run
 
@@ -50,6 +50,7 @@ Replace the example `ANTHROPIC_API_KEY` value in `.env` with your real key befor
 streamlit run app.py
 ```
 - *Upload* – drop one or many files, click **Extract details**.
+- Each extracted document shows a brief summary, key terms, and potential issues or missing/low-confidence details to verify against the original. This is an extraction aid, not a legal review or automatic amendment of the agreement.
 - *All agreements* – search, filter by status/type, open a record, export to Excel/CSV.
 - *Review* – records with warnings or missing fields; correct them and save (marked as reviewed).
 

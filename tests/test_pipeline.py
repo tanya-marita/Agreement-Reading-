@@ -1,5 +1,6 @@
 """Offline tests: loaders, post-processing and the full pipeline with a fake Claude client.
 Run: pytest -q"""
+import json
 import os
 import sys
 from datetime import date
@@ -12,15 +13,131 @@ sys.path.insert(0, ROOT)
 SAMPLES = os.path.join(ROOT, "samples")
 
 from extractor.loaders import UnsupportedFileError, load_file  # noqa: E402
-from extractor.llm import ExtractionError, get_client  # noqa: E402
+from extractor.llm import (  # noqa: E402
+    ExtractionError,
+    _api_status_error_message,
+    _google_compatible_schema,
+    _google_api_error_message,
+    _google_document_parts,
+    api_key_configuration_error,
+    extract_document,
+    extract_with_google,
+    get_client,
+)
 from extractor.postprocess import postprocess  # noqa: E402
+from extractor.schema import AGREEMENT_SCHEMA  # noqa: E402
 
 
-@pytest.mark.parametrize("api_key", ["", "sk-ant-...", "your_api_key_here", "<your-api-key>"])
-def test_get_client_rejects_missing_or_placeholder_api_keys(api_key, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", api_key)
-    with pytest.raises(ExtractionError, match="Set a real ANTHROPIC_API_KEY"):
-        get_client()
+@pytest.mark.parametrize(
+    "provider,api_key",
+    [
+        ("anthropic", ""),
+        ("anthropic", "sk-ant-..."),
+        ("anthropic", "your_api_key_here"),
+        ("anthropic", "<your-api-key>"),
+        ("anthropic", "AQ.example"),
+        ("google", ""),
+        ("google", "..."),
+    ],
+)
+def test_get_client_rejects_missing_or_wrong_provider_keys(provider, api_key):
+    with pytest.raises(ExtractionError):
+        get_client(provider=provider, api_key=api_key)
+
+
+def test_api_key_configuration_accepts_anthropic_key_format():
+    assert api_key_configuration_error("anthropic", "sk-ant-api03-example") is None
+
+
+def test_api_key_configuration_accepts_google_key_without_anthropic_prefix():
+    assert api_key_configuration_error("google", "google-key-example") is None
+
+
+def test_wrong_anthropic_key_gets_actionable_configuration_error():
+    error = api_key_configuration_error("anthropic", "google-key-example")
+    assert error is not None
+    assert "not an Anthropic Console API key" in error
+    assert "sk-ant-" in error
+
+
+def test_google_auth_error_has_provider_specific_guidance():
+    message = _google_api_error_message(401, "unauthorized")
+    assert "GOOGLE_API_KEY" in message
+    assert "AI Studio" in message
+
+
+def test_google_extraction_uses_structured_output():
+    class FakeGoogleClient:
+        def __init__(self):
+            self.models = self
+            self.request = None
+
+        def generate_content(self, **kwargs):
+            self.request = kwargs
+            return SimpleNamespace(
+                text=json.dumps(SAMPLE_OUTPUT),
+                usage_metadata=SimpleNamespace(prompt_token_count=100, candidates_token_count=50),
+            )
+
+    client = FakeGoogleClient()
+    doc = load_file(read("service_agreement_text.pdf"), "agreement.pdf")
+    result = extract_with_google(doc, client=client, model="test-gemini")
+
+    assert result.data == SAMPLE_OUTPUT
+    assert result.model == "test-gemini"
+    assert (result.input_tokens, result.output_tokens) == (100, 50)
+    assert client.request["config"].response_mime_type == "application/json"
+    google_schema = client.request["config"].response_schema
+    assert google_schema["properties"]["signing_date"] == {
+        "type": "string",
+        "description": AGREEMENT_SCHEMA["properties"]["signing_date"]["description"],
+        "nullable": True,
+    }
+    assert client.request["model"] == "test-gemini"
+
+
+def test_google_schema_converts_nullable_unions():
+    schema = _google_compatible_schema(AGREEMENT_SCHEMA)
+    assert schema["properties"]["signing_date"]["type"] == "string"
+    assert schema["properties"]["signing_date"]["nullable"] is True
+    assert isinstance(schema["properties"]["parties"]["items"]["properties"]["name"]["type"], str)
+
+
+def test_google_scanned_pdf_is_sent_as_pdf_part():
+    from google.genai import types
+
+    doc = load_file(read("service_agreement_scanned.pdf"), "scanned.pdf")
+    parts = _google_document_parts(doc)
+    assert len(parts) == 1
+    assert isinstance(parts[0], types.Part)
+    assert parts[0].inline_data.mime_type == "application/pdf"
+
+
+def test_google_image_is_sent_as_image_part():
+    from google.genai import types
+
+    doc = load_file(read("service_agreement_photo.jpg"), "photo.jpg")
+    parts = _google_document_parts(doc)
+    assert len(parts) == 1
+    assert isinstance(parts[0], types.Part)
+    assert parts[0].inline_data.mime_type == "image/jpeg"
+
+
+def test_unknown_provider_is_rejected():
+    with pytest.raises(ExtractionError, match="LLM_PROVIDER"):
+        extract_document(None, provider="unknown")
+
+
+def test_invalid_api_key_error_gives_safe_recovery_steps():
+    message = _api_status_error_message(401, "Invalid bearer token")
+    assert "Anthropic rejected the API key" in message
+    assert "replace ANTHROPIC_API_KEY" in message
+    assert "Invalid bearer token" not in message
+
+
+def test_forbidden_api_error_mentions_model_permissions():
+    message = _api_status_error_message(403, "forbidden")
+    assert "permission to use the configured model" in message
 
 
 def read(name):

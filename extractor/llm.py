@@ -1,13 +1,16 @@
-"""Call Claude and force the answer into AGREEMENT_SCHEMA via a single required tool."""
+"""Extract agreement data with the selected LLM provider."""
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 
 from .loaders import LoadedDocument
 from .schema import AGREEMENT_SCHEMA
 
-DEFAULT_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
+DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").strip().lower()
+DEFAULT_ANTHROPIC_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
+DEFAULT_GOOGLE_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 TOOL_NAME = "record_agreement_details"
 
 SYSTEM_PROMPT = """You extract structured data from business agreements and contracts for a company's records system.
@@ -20,7 +23,7 @@ Rules:
 - If only a start date and a fixed term are given, leave end_date null (the system calculates it) but fill duration_text and duration_months.
 - Amounts: plain numbers (e.g. 150000.00). Sri Lankan 'Rs.' / 'LKR' -> LKR. Record every distinct money term separately (fees, salaries, deposits, penalties, reimbursements).
 - Parties: list every contracting party with its role. Witnesses are not parties.
-- Write the purpose as a short plain-English summary, not a copy of the recitals.
+- Write the purpose as a brief 1–2 sentence plain-English summary of the agreement and its main purpose, not a copy of the recitals.
 - Evidence snippets must be copied from the document, short (under 25 words).
 - Handwritten or blurry parts: give your best reading, set confidence to low and add a warning."""
 
@@ -42,32 +45,84 @@ class LLMResult:
     output_tokens: int
 
 
-def is_missing_or_placeholder_api_key(api_key: str | None) -> bool:
+def api_key_configuration_error(provider: str, api_key: str | None) -> str | None:
+    provider = provider.strip().lower()
     key = (api_key or "").strip().lower()
-    return (
-        not key
-        or "..." in key
-        or key.startswith("<")
-        or key in {"your_api_key_here", "your-anthropic-api-key", "changeme"}
-    )
+    if provider not in {"anthropic", "google"}:
+        return "LLM_PROVIDER must be either 'anthropic' or 'google'."
+    if not key or "..." in key or key.startswith("<") or key in {
+        "your_api_key_here", "your-anthropic-api-key", "changeme",
+    }:
+        if provider == "google":
+            return (
+                "Set GOOGLE_API_KEY in this project's .env to a Gemini API key from "
+                "https://aistudio.google.com/app/apikey."
+            )
+        return "Set a real ANTHROPIC_API_KEY in your .env file; replace the example placeholder."
+    if provider == "anthropic" and not key.startswith("sk-ant-"):
+        return (
+            "ANTHROPIC_API_KEY is set, but it is not an Anthropic Console API key. "
+            "Create an API key in the Anthropic Console (Anthropic keys start with 'sk-ant-'), "
+            "replace the value in this project's .env file, and restart the app."
+        )
+    return None
 
 
-def get_client(api_key: str | None = None):
+def get_client(provider: str | None = None, api_key: str | None = None):
+    provider = (provider or DEFAULT_PROVIDER).strip().lower()
+    key = api_key
+    if key is None:
+        env_name = "GOOGLE_API_KEY" if provider == "google" else "ANTHROPIC_API_KEY"
+        key = os.getenv(env_name)
+    configuration_error = api_key_configuration_error(provider, key)
+    if configuration_error:
+        raise ExtractionError(configuration_error)
+    if provider == "google":
+        from google import genai
+
+        return genai.Client(api_key=key)
+
     import anthropic
 
-    key = api_key if api_key is not None else os.getenv("ANTHROPIC_API_KEY")
-    if is_missing_or_placeholder_api_key(key):
-        raise ExtractionError(
-            "Set a real ANTHROPIC_API_KEY in your .env file; replace the example placeholder."
-        )
     return anthropic.Anthropic(api_key=key, max_retries=3, timeout=180)
+
+
+def _api_status_error_message(status_code: int, message: str) -> str:
+    if status_code == 401:
+        return (
+            "Anthropic rejected the API key (401 Unauthorized). Create a new API key in the "
+            "Anthropic Console, replace ANTHROPIC_API_KEY in this project's .env file, and restart "
+            "the app. A key merely being present in .env does not mean Anthropic accepts it. "
+            "Do not share or commit the key."
+        )
+    if status_code == 403:
+        return (
+            "Anthropic denied this request (403 Forbidden). Check that the account and API key "
+            "have permission to use the configured model."
+        )
+    return f"Claude API error {status_code}: {message}"
+
+
+def _google_api_error_message(status_code: int, message: str) -> str:
+    if status_code in {401, 403}:
+        return (
+            f"Google Gemini rejected this request ({status_code}). Check that GOOGLE_API_KEY is a "
+            "valid Gemini API key from Google AI Studio and that the Gemini API is enabled for its "
+            "project. Replace the key in .env and restart the app."
+        )
+    if status_code == 429:
+        return (
+            "Google Gemini rate or quota limit was reached (429). Check the API quota and billing "
+            "for the Google project, then retry later."
+        )
+    return f"Google Gemini API error {status_code}: {message}"
 
 
 def extract_with_claude(doc: LoadedDocument, client=None, model: str | None = None) -> LLMResult:
     import anthropic
 
-    client = client or get_client()
-    model = model or DEFAULT_MODEL
+    client = client or get_client("anthropic")
+    model = model or DEFAULT_ANTHROPIC_MODEL
     content = list(doc.blocks) + [{"type": "text", "text": USER_INSTRUCTION}]
 
     try:
@@ -84,7 +139,7 @@ def extract_with_claude(doc: LoadedDocument, client=None, model: str | None = No
             messages=[{"role": "user", "content": content}],
         )
     except anthropic.APIStatusError as e:
-        raise ExtractionError(f"Claude API error {e.status_code}: {e.message}") from e
+        raise ExtractionError(_api_status_error_message(e.status_code, e.message)) from e
     except anthropic.APIConnectionError as e:
         raise ExtractionError(f"Could not reach the Claude API: {e}") from e
 
@@ -100,3 +155,104 @@ def extract_with_claude(doc: LoadedDocument, client=None, model: str | None = No
         input_tokens=resp.usage.input_tokens,
         output_tokens=resp.usage.output_tokens,
     )
+
+
+def _google_document_parts(doc: LoadedDocument):
+    import base64
+    from google.genai import types
+
+    parts = []
+    for block in doc.blocks:
+        if block.get("type") == "text":
+            parts.append(block["text"])
+        elif block.get("type") == "document":
+            source = block["source"]
+            parts.append(types.Part.from_bytes(
+                data=base64.b64decode(source["data"]),
+                mime_type=source["media_type"],
+            ))
+        elif block.get("type") == "image":
+            source = block["source"]
+            parts.append(types.Part.from_bytes(
+                data=base64.b64decode(source["data"]),
+                mime_type=source["media_type"],
+            ))
+    return parts
+
+
+def _google_compatible_schema(schema: dict) -> dict:
+    schema = {key: value for key, value in schema.items()}
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        non_null_types = [value for value in schema_type if value != "null"]
+        if len(non_null_types) == 1:
+            schema["type"] = non_null_types[0]
+            schema["nullable"] = "null" in schema_type
+        else:
+            schema["anyOf"] = [
+                {"type": value} if value != "null" else {"nullable": True}
+                for value in schema_type
+            ]
+            schema.pop("type", None)
+    if isinstance(schema.get("properties"), dict):
+        schema["properties"] = {
+            key: _google_compatible_schema(value)
+            for key, value in schema["properties"].items()
+        }
+    if isinstance(schema.get("items"), dict):
+        schema["items"] = _google_compatible_schema(schema["items"])
+    return schema
+
+
+def extract_with_google(doc: LoadedDocument, client=None, model: str | None = None) -> LLMResult:
+    from google import genai
+    from google.genai import types
+
+    client = client or get_client("google")
+    model = model or DEFAULT_GOOGLE_MODEL
+    contents = _google_document_parts(doc)
+    contents.append(SYSTEM_PROMPT + "\n\n" + USER_INSTRUCTION)
+
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=_google_compatible_schema(AGREEMENT_SCHEMA),
+                max_output_tokens=4096,
+            ),
+        )
+    except genai.errors.APIError as e:
+        raise ExtractionError(_google_api_error_message(e.code or 0, e.message or "")) from e
+
+    if not response.text:
+        raise ExtractionError("Google Gemini returned an empty response; retry or check the model/API settings.")
+    try:
+        data = json.loads(response.text)
+    except json.JSONDecodeError as e:
+        raise ExtractionError("Google Gemini returned invalid JSON instead of agreement details.") from e
+    if not isinstance(data, dict):
+        raise ExtractionError("Google Gemini returned a JSON value that is not an agreement object.")
+
+    usage = response.usage_metadata
+    return LLMResult(
+        data=data,
+        model=model,
+        input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+        output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+    )
+
+
+def extract_document(
+    doc: LoadedDocument,
+    client=None,
+    model: str | None = None,
+    provider: str | None = None,
+) -> LLMResult:
+    provider = (provider or DEFAULT_PROVIDER).strip().lower()
+    if provider == "anthropic":
+        return extract_with_claude(doc, client=client, model=model)
+    if provider == "google":
+        return extract_with_google(doc, client=client, model=model)
+    raise ExtractionError("LLM_PROVIDER must be either 'anthropic' or 'google'.")

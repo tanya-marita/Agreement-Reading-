@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 from datetime import date
 
@@ -16,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from extractor import ExtractionError, UnsupportedFileError, process_file, storage  # noqa: E402
-from extractor.llm import is_missing_or_placeholder_api_key  # noqa: E402
+from extractor.llm import DEFAULT_PROVIDER, api_key_configuration_error  # noqa: E402
 from extractor.postprocess import postprocess  # noqa: E402
 from extractor.schema import AGREEMENT_SCHEMA  # noqa: E402
 
@@ -29,6 +30,7 @@ STATUS_LABEL = {
 }
 AGREEMENT_TYPES = AGREEMENT_SCHEMA["properties"]["agreement_type"]["enum"]
 FILE_TYPES = ["pdf", "docx", "txt", "jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"]
+logger = logging.getLogger(__name__)
 
 
 # ---------------- access control ----------------
@@ -75,8 +77,8 @@ def show_record(data: dict, key: str):
     st.markdown(f"**{data.get('agreement_title') or 'Untitled agreement'}** · "
                 f"{(data.get('agreement_type') or '').replace('_', ' ').title()}"
                 + (f" · Ref {data['reference_number']}" if data.get("reference_number") else ""))
-    if data.get("purpose"):
-        st.markdown(f"**Purpose:** {data['purpose']}")
+    st.markdown("**Brief summary**")
+    st.write(data.get("purpose") or "No summary could be extracted from this document.")
 
     meta = {
         "Signing date": data.get("signing_date"), "Term": data.get("duration_text"),
@@ -108,8 +110,21 @@ def show_record(data: dict, key: str):
                 if v:
                     conf = (data.get("confidence") or {}).get(k, "")
                     st.markdown(f"**{k.replace('_', ' ').title()}** ({conf}): “{v}”")
-    if data.get("warnings"):
-        st.warning("**Please check:**\n\n" + "\n".join(f"- {w}" for w in data["warnings"]))
+    review_items = list(data.get("warnings") or [])
+    review_items.extend(
+        f"Missing or unclear: {field.replace('_', ' ')}."
+        for field in der.get("missing_fields", [])
+    )
+    review_items.extend(
+        f"Low confidence: {field.replace('_', ' ')}."
+        for field in der.get("low_confidence_fields", [])
+    )
+    review_items = list(dict.fromkeys(review_items))
+    st.markdown("**Potential issues to verify**")
+    if review_items:
+        st.warning("\n".join(f"- {item}" for item in review_items))
+    else:
+        st.info("No extraction issues were flagged. Check these details against the original; this is not a legal review.")
     st.download_button("Download JSON", json.dumps(data, indent=2, ensure_ascii=False),
                        file_name="agreement.json", mime="application/json", key=f"dl_{key}")
 
@@ -156,8 +171,13 @@ def review_form(row: dict):
 st.sidebar.title("📄 Agreement Extractor")
 page = st.sidebar.radio("Go to", ["Upload", "All agreements", "Review"])
 user = st.sidebar.text_input("Your name (for the record)", key="user")
-if is_missing_or_placeholder_api_key(os.getenv("ANTHROPIC_API_KEY")):
-    st.sidebar.error("Replace the ANTHROPIC_API_KEY placeholder in .env with your real Anthropic API key.")
+provider = os.getenv("LLM_PROVIDER", DEFAULT_PROVIDER).strip().lower()
+key_variable = "GOOGLE_API_KEY" if provider == "google" else "ANTHROPIC_API_KEY"
+provider_label = "Google Gemini" if provider == "google" else "Anthropic Claude" if provider == "anthropic" else provider
+st.sidebar.caption(f"Extraction provider: {provider_label}")
+api_key_error = api_key_configuration_error(provider, os.getenv(key_variable))
+if api_key_error:
+    st.sidebar.error(api_key_error)
 
 if page == "Upload":
     st.header("Upload agreements")
@@ -170,8 +190,17 @@ if page == "Upload":
                 try:
                     res = process_file(f.getvalue(), f.name, uploaded_by=user or None, reprocess=reprocess)
                 except (UnsupportedFileError, ExtractionError) as e:
-                    s.update(label=f"{f.name}: failed", state="error")
+                    s.update(label=f"{f.name}: failed — {str(e)[:200]}", state="error", expanded=True)
                     st.error(str(e))
+                    continue
+                except Exception as e:
+                    logger.exception("Unexpected error processing uploaded file %s", f.name)
+                    s.update(
+                        label=f"{f.name}: failed — {type(e).__name__}: {str(e)[:200]}",
+                        state="error",
+                        expanded=True,
+                    )
+                    st.error(f"Could not process {f.name} ({type(e).__name__}): {e}")
                     continue
                 label = f"{f.name}: " + ("already in the system" if res.duplicate else "done")
                 s.update(label=label, state="complete")

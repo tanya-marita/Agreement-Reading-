@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 
 from . import storage
-from .llm import ExtractionError, extract_with_claude
+from .llm import ExtractionError, extract_document
 from .loaders import UnsupportedFileError, load_file
 from .postprocess import postprocess
 
@@ -34,7 +34,7 @@ def process_file(data: bytes, filename: str, *, client=None, model: str | None =
     if existing and not reprocess:
         return ProcessResult(existing["id"], json.loads(existing["data_json"]), True, doc.mode)
 
-    llm = extract_with_claude(doc, client=client, model=model)
+    llm = extract_document(doc, client=client, model=model)
     record = postprocess(llm.data)
     record["warnings"] = doc.warnings + record["warnings"]
     record["derived"]["input_mode"] = doc.mode
