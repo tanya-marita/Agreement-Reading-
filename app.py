@@ -185,7 +185,7 @@ if page == "Upload":
     files = st.file_uploader("Agreement files", type=FILE_TYPES, accept_multiple_files=True)
     reprocess = st.checkbox("Re-extract files that were uploaded before")
     if files and st.button("Extract details", type="primary"):
-        for f in files:
+        for upload_index, f in enumerate(files):
             with st.status(f"Reading {f.name}…", expanded=True) as s:
                 try:
                     res = process_file(f.getvalue(), f.name, uploaded_by=user or None, reprocess=reprocess)
@@ -206,7 +206,7 @@ if page == "Upload":
                 s.update(label=label, state="complete")
                 if res.duplicate:
                     st.info("This exact file was uploaded before; showing the saved result.")
-                show_record(res.data, key=f"{res.id}_{f.name}")
+                show_record(res.data, key=f"{res.id}_{upload_index}_{f.name}")
 
 elif page == "All agreements":
     st.header("All agreements")
