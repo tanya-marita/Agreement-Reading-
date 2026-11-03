@@ -1,6 +1,6 @@
 # Agreement Extractor
 
-Upload an agreement (typed PDF, scanned PDF, photo or Word file) and the system pulls out its key details with Claude, saves them to a database, and flags anything a person should check.
+Upload an agreement (typed PDF, scanned PDF, photo or Word file) and the system pulls out its key details with the configured Anthropic Claude or Google Gemini provider, saves them to a database, and flags anything a person should check.
 
 **Extracted fields:** title, type, reference no., parties (name, role, company/individual, address, reg./NIC no., signatory and title), signing date, start date, end date, term, renewal, termination notice, purpose, every money term (amount, currency, frequency, payer/payee, conditions), total contract value, governing law, key obligations, whether it is signed, plus evidence snippets, confidence levels and warnings.
 
@@ -10,13 +10,13 @@ Upload an agreement (typed PDF, scanned PDF, photo or Word file) and the system 
 
 ```
 upload ─► loaders.py ─────────────► llm.py ─────────────► postprocess.py ─► storage.py (SQLite)
-          text PDF  → text            Claude API,           clean dates,      + original file
-          scanned   → PDF pages       forced tool call      calc end date,    in data/uploads
-          image     → image blocks    with JSON schema      status, checks
-          .docx     → text + tables   (schema.py)
+          text PDF  → text            Claude or Gemini,     clean dates,      + original file
+          scanned   → PDF document    structured JSON       calc end date,    in data/uploads
+          image     → image blocks    from schema.py        status, checks
+          .docx     → text + tables
 ```
 
-- Scanned PDFs and photos are read directly by Claude's vision, so no Tesseract/OCR install is needed.
+- Scanned PDFs and photos are sent to the configured provider's vision model, so no Tesseract/OCR install is needed.
 - Uploading the same file twice reuses the saved result (matched by SHA-256 hash), so you don't pay twice.
 - The prompt tells the model to return `null` instead of guessing, and to treat placeholders like `[date]` as empty.
 
@@ -65,13 +65,13 @@ Endpoints: `POST /agreements`, `GET /agreements?status=expiring_soon`, `GET /agr
 
 ```bash
 python samples/make_samples.py   # creates text PDF, scanned PDF, photo and .docx samples
-pytest -q                        # runs offline with a fake Claude client
+pytest -q                        # runs offline with fake provider clients
 ```
 To check real accuracy, upload the files in `samples/` (and 20–30 of your own agreements) and compare against what a person reads from them.
 
 ## Before using with real company documents
 
-- **Data privacy:** agreement contents are sent to the Anthropic API. Check this against your company's data policy and any client confidentiality terms. Anthropic's commercial terms and data-retention options are on their website.
+- **Data privacy:** agreement contents are sent to the selected provider (Anthropic or Google). Check the provider's terms, data-retention options, and your company's/client confidentiality policies before uploading real agreements.
 - **Access:** set `APP_PASSWORD` and `API_TOKEN` in `.env`. For wider use, put the app behind your company login (SSO/reverse proxy) and HTTPS.
 - **Storage:** `data/` holds the database and original files. Back it up, and restrict who can read it. For many users, swap SQLite for PostgreSQL (only `storage.py` changes).
 - **Human check:** treat extracted dates and amounts as a draft until someone reviews flagged records, especially for scanned or handwritten documents.
@@ -84,8 +84,8 @@ app.py                 Streamlit web app
 api.py                 FastAPI REST API
 extractor/
   schema.py            fields the model must return
-  loaders.py           PDF / scan / image / Word → API content
-  llm.py               Claude call and prompt
+  loaders.py           PDF / scan / image / Word → provider content
+  llm.py               Anthropic/Gemini calls, prompts and retries
   postprocess.py       cleaning, end-date calculation, status, warnings
   storage.py           SQLite database
 samples/               sample generator + sample agreements
